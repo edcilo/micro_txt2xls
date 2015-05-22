@@ -2,6 +2,5 @@
 /vendor
 /.idea
 /public/txt_temp/*
-.env.*.php
 .env.php
 .env

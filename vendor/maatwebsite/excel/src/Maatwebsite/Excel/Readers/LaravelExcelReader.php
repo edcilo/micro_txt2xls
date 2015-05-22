@@ -3,7 +3,10 @@
 use Cache;
 use Config;
 use Maatwebsite\Excel\Classes\PHPExcel;
+use PHPExcel_Cell;
 use PHPExcel_IOFactory;
+use PHPExcel_Cell_IValueBinder;
+use PHPExcel_Cell_DefaultValueBinder;
 use Illuminate\Filesystem\Filesystem;
 use Maatwebsite\Excel\Parsers\ExcelParser;
 use Maatwebsite\Excel\Classes\FormatIdentifier;
@@ -27,6 +30,11 @@ class LaravelExcelReader {
      * @var \PHPExcel
      */
     public $excel;
+
+    /**
+     * @var \PHPExcel
+     */
+    protected $original;
 
     /**
      * Spreadsheet writer
@@ -186,11 +194,6 @@ class LaravelExcelReader {
     /**
      * @var bool|string
      */
-    protected $lineEnding;
-
-    /**
-     * @var bool|string
-     */
     protected $enclosure;
 
     /**
@@ -209,12 +212,13 @@ class LaravelExcelReader {
      * Load a file
      * @param  string        $file
      * @param string|boolean $encoding
+     * @param bool           $noBasePath
      * @return LaravelExcelReader
      */
-    public function load($file, $encoding = false)
+    public function load($file, $encoding = false, $noBasePath = false)
     {
         // init the loading
-        $this->_init($file, $encoding);
+        $this->_init($file, $encoding, $noBasePath);
 
         // Only fetch selected sheets if necessary
         if ($this->sheetsSelected())
@@ -238,26 +242,35 @@ class LaravelExcelReader {
         // Default
         $isCallable = false;
 
+        // Init a new PHPExcel instance without any worksheets
+        if(!$this->excel instanceof PHPExcel) {
+            $this->original = $this->excel;
+            $this->initClonedExcelObject($this->excel);
+
+            // Clone all connected sheets
+            foreach($this->original->getAllSheets() as $sheet)
+            {
+                $this->excel->createSheet()->cloneParent($sheet);
+            }
+        }
+
         // Copy the callback when needed
         if(is_callable($sheetID))
         {
             $callback = $sheetID;
             $isCallable = true;
         }
+        elseif(is_callable($callback))
+        {
+            $isCallable = true;
+        }
 
         // Clone the loaded excel instance
-        $clone = clone $this->excel;
-        $sheet = $this->getSheetByIdOrName($sheetID, $isCallable);
-
-        // Init a new PHPExcel instance without any worksheets
-        $this->initClonedExcelObject($clone);
-
-        // Create a new cloned sheet
-        $this->sheet = $this->excel->createSheet()->cloneParent($sheet);
+        $this->sheet = $this->getSheetByIdOrName($sheetID);
 
         // Do the callback
         if ($isCallable)
-            $return = call_user_func($callback, $this->sheet);
+            call_user_func($callback, $this->sheet);
 
         // Return the sheet
         return $this->sheet;
@@ -284,18 +297,6 @@ class LaravelExcelReader {
         $this->enclosure = $enclosure;
         return $this;
     }
-
-    /**
-     * Set csv line ending
-     * @param $lineEnding
-     * @return $this
-     */
-    public function setLineEnding($lineEnding)
-    {
-        $this->lineEnding = $lineEnding;
-        return $this;
-    }
-
 
     /**
      * set selected sheets
@@ -507,7 +508,7 @@ class LaravelExcelReader {
 
             // Load file with chunk filter enabled
             $this->excel = $this->reader->load($this->file);
-            
+
             // Slice the results
             $results = $this->get()->slice($startIndex, $chunkSize);
 
@@ -577,12 +578,12 @@ class LaravelExcelReader {
      * Init the loading
      * @param      $file
      * @param bool $encoding
-     * @return void
+     * @param bool $noBasePath
      */
-    protected function _init($file, $encoding = false)
+    protected function _init($file, $encoding = false, $noBasePath = false)
     {
         // Set the extension
-        $this->_setFile($file)
+        $this->_setFile($file, $noBasePath)
               ->setExtension()
               ->setTitle()
               ->_setFormat()
@@ -642,12 +643,13 @@ class LaravelExcelReader {
     /**
      * Set the file
      * @param string $file
+     * @param bool   $noBasePath
      * @return $this
      */
-    protected function _setFile($file)
+    protected function _setFile($file, $noBasePath = false)
     {
         // check if we have a correct path
-        if (!realpath($file))
+        if (!$noBasePath && !realpath($file))
             $file = base_path($file);
 
         $this->file = $file;
@@ -675,6 +677,29 @@ class LaravelExcelReader {
     public function setExtension($ext = false)
     {
         $this->ext = $ext ? $ext : $this->filesystem->extension($this->file);
+
+        return $this;
+    }
+
+    /**
+     * Set custom value binder
+     * @param string|boolean $ext
+     * @return void
+     */
+    public function setValueBinder(PHPExcel_Cell_IValueBinder $binder)
+    {
+        PHPExcel_Cell::setValueBinder($binder);
+
+        return $this;
+    }
+
+    /**
+     * Reset the value binder back to default
+     * @return void
+     */
+    public function resetValueBinder()
+    {
+        PHPExcel_Cell::setValueBinder(new PHPExcel_Cell_DefaultValueBinder);
 
         return $this;
     }
@@ -874,8 +899,31 @@ class LaravelExcelReader {
      */
     public function getTotalRowsOfFile()
     {
+        // Get worksheet info
+        $spreadsheetInfo = $this->getSheetInfoForActive();
+
+        // return total rows
+        return $spreadsheetInfo['totalRows'];
+    }
+
+    /**
+     * Get sheet info for active sheet
+     * @return mixed
+     */
+    public function getSheetInfoForActive()
+    {
         $spreadsheetInfo = $this->reader->listWorksheetInfo($this->file);
-        return $spreadsheetInfo[0]['totalRows'];
+
+        // Loop through the info
+        foreach($spreadsheetInfo as $key => $value)
+        {
+            // When we hit the right worksheet
+            if($value['worksheetName'] == $this->getActiveSheet()->getTitle())
+                $index = $key;
+        }
+
+        // return total rows
+        return $spreadsheetInfo[$index];
     }
 
     /**
@@ -884,23 +932,18 @@ class LaravelExcelReader {
     protected function initClonedExcelObject($clone)
     {
         $this->excel = new PHPExcel();
-        $this->excel->cloneParent($clone);
+        $this->excel->cloneParent(clone $clone);
         $this->excel->disconnectWorksheets();
     }
 
     /**
-     * Get the sheet by id or name, else get the active sheet
+     * Get the sheet by id or name
      * @param callable|integer|string $sheetID
-     * @param  boolean                $isCallable
      * @throws \PHPExcel_Exception
      * @return \PHPExcel_Worksheet
      */
-    protected function getSheetByIdOrName($sheetID, $isCallable = false)
+    protected function getSheetByIdOrName($sheetID)
     {
-        // If is callback, return the active sheet
-        if($isCallable)
-            return $this->excel->getActiveSheet();
-
         // If is a string, return the sheet by name
         if(is_string($sheetID))
             return $this->excel->getSheetByName($sheetID);
@@ -1033,10 +1076,6 @@ class LaravelExcelReader {
             else
                 $this->reader->setEnclosure($this->enclosure);
 
-            if(!$this->lineEnding)
-                $this->reader->setLineEnding(Config::get('excel::csv.line_ending', "\r\n"));
-            else
-                $this->reader->setLineEnding($this->lineEnding);
         }
 
         // Set default calculate
@@ -1053,6 +1092,9 @@ class LaravelExcelReader {
 
         // Set default date columns
         $this->dateColumns = Config::get('excel::import.dates.columns', array());
+
+        // Set default include charts
+        $this->reader->setIncludeCharts(Config::get('excel::import.includeCharts', false));
     }
 
     /**
@@ -1062,6 +1104,7 @@ class LaravelExcelReader {
     protected function _reset()
     {
         $this->excel->disconnectWorksheets();
+        $this->resetValueBinder();
         unset($this->parsed);
     }
 

@@ -286,7 +286,7 @@ class LaravelExcelWorksheet extends PHPExcel_Worksheet {
 
         // Else if the 2nd param was set, we will use it as a cell value
         if ($callback)
-            $this->sheet->setCellValue($cell, $callback);
+            $this->setCellValue($cell, $callback);
 
         return $this;
     }
@@ -666,10 +666,12 @@ class LaravelExcelWorksheet extends PHPExcel_Worksheet {
         // If is a style
         elseif (in_array($key, $this->allowedStyles))
         {
-            $this->setDefaultStyles($setter, $key, $params);
+           return $this->setDefaultStyles($setter, $key, $params);
         }
-
-        throw new LaravelExcelException('[ERROR] Laravel Worksheet method [' . $setter . '] does not exist.');
+        else
+        {
+            throw new LaravelExcelException('[ERROR] Laravel Worksheet method [' . $setter . '] does not exist.');
+        }
     }
 
     /**
@@ -724,24 +726,17 @@ class LaravelExcelWorksheet extends PHPExcel_Worksheet {
      * @param array|string $params
      * @return  PHPExcel_Style
      */
-    protected function setFontStyle($caller, $key, $params)
+    protected function setFontStyle($caller, $setter, $key, $params)
     {
         // Set caller to font
         $caller = $caller->getFont();
         $params = is_array($params) ? $params : array($params);
 
         // Clean the setter name
-        $key = lcfirst(str_replace('font', '', $key));
+        $setter = lcfirst(str_replace('Font', '', $setter));
 
-        // Get setter method
-        list($setter, $key) = $this->_setSetter($key);
-
-        switch ($key)
-        {
-            case 'family':
-                $setter = 'setName';
-                break;
-        }
+        // Replace special cases
+        $setter = str_replace('Family', 'Name', $setter);
 
         return call_user_func_array(array($caller, $setter), $params);
     }
@@ -1096,6 +1091,25 @@ class LaravelExcelWorksheet extends PHPExcel_Worksheet {
     }
 
     /**
+     * Password protect a sheet
+     * @param          $password
+     * @param callable $callback
+     */
+    public function protect($password, Closure $callback = null)
+    {
+        $protection = $this->getProtection();
+        $protection->setPassword($password);
+        $protection->setSheet(true);
+        $protection->setSort(true);
+        $protection->setInsertRows(true);
+        $protection->setFormatCells(true);
+
+        if(is_callable($callback)) {
+            call_user_func($callback, $protection);
+        }
+    }
+
+    /**
      * Return the start row
      * @return integer
      */
@@ -1171,6 +1185,9 @@ class LaravelExcelWorksheet extends PHPExcel_Worksheet {
             );
         }
 
+        // Rebind the PhpExcel object to the style objects
+        $this->getStyle()->bindParent($this->getParent());
+
         return $this;
     }
 
@@ -1213,7 +1230,7 @@ class LaravelExcelWorksheet extends PHPExcel_Worksheet {
      */
     public function setValueOfCell($cellValue, $currentColumn, $startRow)
     {
-        is_numeric($cellValue) && !is_integer($cellValue)
+        is_string($cellValue) && is_numeric($cellValue) && !is_integer($cellValue)
             ? $this->getCell($currentColumn . $startRow)->setValueExplicit($cellValue)
             : $this->getCell($currentColumn . $startRow)->setValue($cellValue);
     }
